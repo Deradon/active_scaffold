@@ -81,9 +81,16 @@ module ActiveScaffold::Actions
         active_scaffold_config.model.transaction do
           @record = update_record_from_params(@record, active_scaffold_config.update.columns, params[:record]) unless options[:no_record_param_update]
           before_update_save(@record)
-          self.successful = [@record.valid?, @record.associated_valid?].all? {|v| v == true} # this syntax avoids a short-circuit
+
+          # HACK: associated_valid? somehow bugged, so just quick / dirty
+          # self.successful = [@record.valid?, @record.associated_valid?].all? {|v| v == true} # this syntax avoids a short-circuit
+          self.successful = @record.valid?
+
           if successful?
-            @record.save! and @record.save_associated!
+            # HACK: save_associated! somehow bugged, so just quick / dirty
+            # @record.save! and @record.save_associated!
+            @record.save!
+
             after_update_save(@record)
           else
             # some associations such as habtm are saved before saved is called on parent object
@@ -148,3 +155,4 @@ module ActiveScaffold::Actions
     end
   end
 end
+
