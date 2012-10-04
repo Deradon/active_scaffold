@@ -75,7 +75,7 @@ module ActiveScaffold
   def self.set_defaults(&block)
     ActiveScaffold::Config::Core.configure &block
   end
-  
+
   def active_scaffold_config
     self.class.active_scaffold_config
   end
@@ -120,11 +120,11 @@ module ActiveScaffold
   def hover_via_click?
     session[:hover_supported] == false
   end
-  
+
   def self.js_framework=(framework)
     @@js_framework = framework
   end
-  
+
   def self.js_framework
     @@js_framework ||= if defined? Jquery
       :jquery
@@ -244,7 +244,7 @@ module ActiveScaffold
         column.set_link(Proc.new {|col| link_for_association(col)})
       end
     end
-    
+
     def active_scaffold_controller_for_column(column, options = {})
       begin
         if column.polymorphic_association?
@@ -255,32 +255,32 @@ module ActiveScaffold
           active_scaffold_controller_for(column.association.klass)
         end
       rescue ActiveScaffold::ControllerNotFound
-        nil        
+        nil
       end
     end
-    
+
     def link_for_association(column, options = {})
       controller = active_scaffold_controller_for_column(column, options)
-      
+
       unless controller.nil?
         options.reverse_merge! :label => column.label, :position => :after, :type => :member, :controller => (controller == :polymorph ? controller : controller.controller_path), :column => column
         options[:parameters] ||= {}
         options[:parameters].reverse_merge! :parent_scaffold => controller_path, :association => column.association.name
         if column.plural_association?
           # note: we can't create nested scaffolds on :through associations because there's no reverse association.
-          
+
           ActiveScaffold::DataStructures::ActionLink.new('index', options) #unless column.through_association?
         else
           actions = controller.active_scaffold_config.actions unless controller == :polymorph
-          actions ||= [:create, :update, :show] 
+          actions ||= [:create, :update, :show]
           column.actions_for_association_links.delete :new unless actions.include? :create
           column.actions_for_association_links.delete :edit unless actions.include? :update
           column.actions_for_association_links.delete :show unless actions.include? :show
           ActiveScaffold::DataStructures::ActionLink.new(nil, options.merge(:html_options => {:class => column.name}))
-        end 
+        end
       end
     end
-    
+
     def link_for_association_as_scope(scope, options = {})
       options.reverse_merge! :label => scope, :position => :after, :type => :member, :controller => controller_path
       options[:parameters] ||= {}
@@ -342,8 +342,20 @@ module ActiveScaffold
     def active_scaffold_controller_for(klass)
       controller_namespace = self.to_s.split('::')[0...-1].join('::') + '::'
       error_message = []
+
+      # HACK: This algorithm was broken with namespace
+      # Example: klass = "Package::Feature"
+      #          self.to_s = "Admin::Package::FeaturesController"
+      #          => controller_namespace == "Admin::Package::"
+      fixed_klass = klass.to_s.split("::").last
+
       [controller_namespace, ''].each do |namespace|
-        ["#{klass.to_s.underscore.pluralize}", "#{klass.to_s.underscore.pluralize.singularize}"].each do |controller_name|
+        [
+          "#{klass.to_s.underscore.pluralize}",
+          "#{klass.to_s.underscore.pluralize.singularize}",
+          "#{fixed_klass.to_s.underscore.pluralize}",
+          "#{fixed_klass.to_s.underscore.pluralize.singularize}"
+        ].each do |controller_name|
           begin
             controller = "#{namespace}#{controller_name.camelize}Controller".constantize
           rescue NameError => error
@@ -370,3 +382,4 @@ module ActiveScaffold
 end
 
 require 'active_scaffold_env'
+
