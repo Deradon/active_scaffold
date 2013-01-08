@@ -47,9 +47,9 @@ module ActiveScaffold::Actions
       end
     end
     def update_respond_to_js
-      if successful? && update_refresh_list? && !render_parent?
-        do_search if respond_to? :do_search
-        do_list
+      if successful?
+        do_refresh_list if update_refresh_list? && !render_parent?
+        flash.now[:info] = as_(:updated_model, :model => @record.to_label) if active_scaffold_config.update.persistent
       end
       render :action => 'on_update'
     end
@@ -65,7 +65,6 @@ module ActiveScaffold::Actions
     # A simple method to find and prepare a record for editing
     # May be overridden to customize the record (set default values, etc.)
     def do_edit
-      register_constraints_with_action_columns(nested.constrained_fields, active_scaffold_config.update.hide_nested_column ? [] : [:update]) if nested?
       @record = find_if_allowed(params[:id], :update)
     end
 
@@ -77,9 +76,10 @@ module ActiveScaffold::Actions
     end
 
     def update_save(options = {})
+      attributes = options[:attributes] || params[:record]
       begin
         active_scaffold_config.model.transaction do
-          @record = update_record_from_params(@record, active_scaffold_config.update.columns, params[:record]) unless options[:no_record_param_update]
+          @record = update_record_from_params(@record, active_scaffold_config.update.columns, attributes) unless options[:no_record_param_update]
           before_update_save(@record)
 
           # HACK: associated_valid? somehow bugged, so just quick / dirty
@@ -98,14 +98,14 @@ module ActiveScaffold::Actions
             raise ActiveRecord::Rollback, "don't save habtm associations unless record is valid"
           end
         end
-      rescue ActiveRecord::RecordInvalid
-        flash[:error] = $!.message
-        self.successful = false
       rescue ActiveRecord::StaleObjectError
         @record.errors.add(:base, as_(:version_inconsistency))
         self.successful = false
       rescue ActiveRecord::RecordNotSaved
         @record.errors.add(:base, as_(:record_not_saved)) if @record.errors.empty?
+        self.successful = false
+      rescue ActiveRecord::ActiveRecordError => ex
+        flash[:error] = ex.message
         self.successful = false
       end
     end
@@ -114,7 +114,13 @@ module ActiveScaffold::Actions
       @record = active_scaffold_config.model.find(params[:id])
       if @record.authorized_for?(:crud_type => :update, :column => params[:column])
         column = active_scaffold_config.columns[params[:column].to_sym]
-        params[:value] ||= @record.column_for_attribute(params[:column]).default unless @record.column_for_attribute(params[:column]).nil? || @record.column_for_attribute(params[:column]).null
+        unless @record.column_for_attribute(params[:column]).nil? || @record.column_for_attribute(params[:column]).null
+          if @record.column_for_attribute(params[:column]).default == true
+            params[:value] ||= false
+          else
+            params[:value] ||= @record.column_for_attribute(params[:column]).default
+          end
+        end
         unless column.nil?
           params[:value] = column_value_from_param_value(@record, column, params[:value])
           params[:value] = [] if params[:value].nil? && column.form_ui && column.plural_association?
@@ -140,7 +146,7 @@ module ActiveScaffold::Actions
     # The default security delegates to ActiveRecordPermissions.
     # You may override the method to customize.
     def update_authorized?(record = nil)
-      (!nested? || !nested.readonly?) && authorized_for?(:crud_type => :update)
+      (!nested? || !nested.readonly?) && (record || self).send(:authorized_for?, :crud_type => :update)
     end
     private
     def update_authorized_filter

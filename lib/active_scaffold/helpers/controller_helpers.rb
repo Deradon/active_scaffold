@@ -2,10 +2,14 @@ module ActiveScaffold
   module Helpers
     module ControllerHelpers
       def self.included(controller)
-        controller.class_eval { helper_method :params_for, :main_path_to_return, :render_parent?, :render_parent_options, :render_parent_action, :nested_singular_association?, :build_associated}
+        controller.class_eval { helper_method :params_for, :params_conditions, :main_path_to_return, :render_parent?, :render_parent_options, :render_parent_action, :nested_singular_association?, :build_associated}
       end
       
       include ActiveScaffold::Helpers::IdHelpers
+
+      def params_conditions
+        conditions_from_params.keys
+      end
       
       def params_for(options = {})
         # :adapter and :position are one-use rendering arguments. they should not propagate.
@@ -30,12 +34,12 @@ module ActiveScaffold
           parameters = {}
           if params[:parent_controller]
             parameters[:controller] = params[:parent_controller]
-            #parameters[:eid] = params[:parent_controller]
+            #parameters[:eid] = params[:parent_controller] # not neeeded anymore?
           end
           parameters.merge! nested.to_params if nested?
           if params[:parent_sti]
             parameters[:controller] = params[:parent_sti]
-            #parameters[:eid] = nil
+            #parameters[:eid] = nil # not neeeded anymore?
           end
           parameters[:parent_column] = nil
           parameters[:parent_id] = nil
@@ -59,22 +63,20 @@ module ActiveScaffold
         if nested_singular_association?
           {:controller => nested.parent_scaffold.controller_path, :action => :row, :id => nested.parent_id}
         elsif params[:parent_sti]
-          options = {:controller => params[:parent_sti], :action => render_parent_action(params[:parent_sti])}
-          if render_parent_action(params[:parent_sti]) == :index
-            options.merge(params.slice(:eid))
-          else
-            options.merge({:id => @record.id})
-          end
+          options = params_for(:controller => params[:parent_sti], :action => render_parent_action, :parent_sti => nil)
+          options.merge(:id => @record.id) if render_parent_action == :row
         end
       end
 
-      def render_parent_action(controller_path = nil)
+      def render_parent_action
         begin
           @parent_action = :row
-          parent_controller = "#{controller_path.to_s.camelize}Controller".constantize
-          @parent_action = :index if action_name == 'create' && parent_controller.active_scaffold_config.actions.include?(:create) && parent_controller.active_scaffold_config.create.refresh_list == true
-          @parent_action = :index if action_name == 'update' && parent_controller.active_scaffold_config.actions.include?(:update) && parent_controller.active_scaffold_config.update.refresh_list == true
-          @parent_action = :index if action_name == 'destroy' && parent_controller.active_scaffold_config.actions.include?(:delete) && parent_controller.active_scaffold_config.delete.refresh_list == true
+          if params[:parent_sti]
+            parent_controller = "#{params[:parent_sti].to_s.camelize}Controller".constantize
+            @parent_action = :index if action_name == 'create' && parent_controller.active_scaffold_config.actions.include?(:create) && parent_controller.active_scaffold_config.create.refresh_list == true
+            @parent_action = :index if action_name == 'update' && parent_controller.active_scaffold_config.actions.include?(:update) && parent_controller.active_scaffold_config.update.refresh_list == true
+            @parent_action = :index if action_name == 'destroy' && parent_controller.active_scaffold_config.actions.include?(:delete) && parent_controller.active_scaffold_config.delete.refresh_list == true
+          end
         rescue ActiveScaffold::ControllerNotFound
         end if @parent_action.nil?
         @parent_action

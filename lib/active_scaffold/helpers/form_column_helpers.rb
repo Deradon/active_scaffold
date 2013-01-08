@@ -15,11 +15,11 @@ module ActiveScaffold
       def active_scaffold_render_input(column, options)
         begin
           # first, check if the dev has created an override for this specific field
-          if override_form_field?(column)
-            send(override_form_field(column), @record, options)
+          if (method = override_form_field(column))
+            send(method, @record, options)
           # second, check if the dev has specified a valid form_ui for this column
-          elsif column.form_ui and override_input?(column.form_ui)
-            send(override_input(column.form_ui), column, options)
+          elsif column.form_ui and (method = override_input(column.form_ui))
+            send(method, column, options)
           # fallback: we get to make the decision
           else
             if column.association
@@ -36,8 +36,8 @@ module ActiveScaffold
 
             else # regular model attribute column
               # if we (or someone else) have created a custom render option for the column type, use that
-              if override_input?(column.column.type)
-                send(override_input(column.column.type), column, options)
+              if (method = override_input(column.column.type))
+                send(method, column, options)
               # final ultimate fallback: use rails' generic input method
               else
                 # for textual fields we pass different options
@@ -73,8 +73,11 @@ module ActiveScaffold
         # Fix for keeping unique IDs in subform
         id_control = "record_#{column.name}_#{[params[:eid], params[:id]].compact.join '_'}"
         id_control += scope_id(scope) if scope
+        
+        classes = "#{column.name}-input"
+        classes += ' numeric-input' if column.number?
 
-        { :name => name, :class => "#{column.name}-input", :id => id_control}.merge(options)
+        { :name => name, :class => classes, :id => id_control}.merge(options)
       end
 
       def update_columns_options(column, scope, options)
@@ -97,6 +100,12 @@ module ActiveScaffold
       ## Form input methods
       ##
 
+      def active_scaffold_translate_select_options(options)
+        options[:include_blank] = as_(options[:include_blank]) if options[:include_blank].is_a? Symbol
+        options[:prompt] = as_(options[:prompt]) if options[:prompt].is_a? Symbol
+        options
+      end
+      
       def active_scaffold_input_singular_association(column, html_options)
         associated = @record.send(column.association.name)
 
@@ -110,6 +119,7 @@ module ActiveScaffold
         html_options.update(column.options[:html_options] || {})
         options.update(column.options)
         html_options[:name] = "#{html_options[:name]}[]" if (html_options[:multiple] == true && !html_options[:name].to_s.ends_with?("[]"))
+        active_scaffold_translate_select_options(options)
         select(:record, method, select_options.uniq, options, html_options)
       end
 
@@ -123,7 +133,7 @@ module ActiveScaffold
       
       def active_scaffold_checkbox_list(column, select_options, associated_ids, options)
         html = content_tag :ul, :class => "#{options[:class]} checkbox-list", :id => options[:id] do
-          content = "".html_safe
+          content = hidden_field_tag("#{options[:name]}[]", '')
           select_options.each_with_index do |option, i|
             label, id = option
             this_id = "#{options[:id]}_#{i}_id"
@@ -150,6 +160,7 @@ module ActiveScaffold
         end
         html_options.update(column.options[:html_options] || {})
         options.update(column.options)
+        active_scaffold_translate_select_options(options)
         select(:record, column.name, options_for_select, options, html_options)
       end
 
@@ -229,26 +240,16 @@ module ActiveScaffold
       end
 
       def override_form_field(column)
-        method_with_class = override_form_field_name(column, true)
-        return method_with_class if respond_to?(method_with_class)
-        method = override_form_field_name(column)
-        method if respond_to?(method)
+        override_helper column, 'form_column'
       end
       alias_method :override_form_field?, :override_form_field
 
-      # the naming convention for overriding form fields with helpers
-      def override_form_field_name(column, class_prefix = false)
-        "#{clean_class_name(column.active_record_class.name) + '_' if class_prefix}#{clean_column_name(column.name)}_form_column"
-      end
-
-      def override_input?(form_ui)
-        respond_to?(override_input(form_ui))
-      end
-
       # the naming convention for overriding form input types with helpers
       def override_input(form_ui)
-        "active_scaffold_input_#{form_ui}"
+        method = "active_scaffold_input_#{form_ui}"
+        method if respond_to? method
       end
+      alias_method :override_input?, :override_input
 
       def form_partial_for_column(column, renders_as = nil)
         renders_as ||= column_renders_as(column)
@@ -288,11 +289,11 @@ module ActiveScaffold
         end
       end
 
-      def column_scope(column)
+      def column_scope(column, scope = nil)
         if column.plural_association?
-          "[#{column.name}][#{@record.id || generate_temporary_id}]"
+          "#{scope}[#{column.name}][#{@record.id || generate_temporary_id}]"
         else
-          "[#{column.name}]"
+          "#{scope}[#{column.name}]"
         end
       end
 

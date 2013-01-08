@@ -67,7 +67,10 @@ module ActiveScaffold::DataStructures
     attr_accessor :send_form_on_update_column
 
     # column to be updated in a form when this column changes
-    attr_accessor :update_column
+    def update_column=(column_name)
+      ActiveSupport::Deprecation.warn "Use update_columns= instead of update_column="
+      self.update_columns = column_name
+    end
 
     # send all the form instead of only new value when this column change
     cattr_accessor :send_form_on_update_column
@@ -165,7 +168,7 @@ module ActiveScaffold::DataStructures
     attr_reader :includes
     def includes=(value)
       @includes = case value
-        when Array, Hash then value 
+        when Array then value 
         else [value] # automatically convert to an array
       end
     end
@@ -176,7 +179,10 @@ module ActiveScaffold::DataStructures
     # describes how to search on a column
     #   search = true           default, uses intelligent search sql
     #   search = "CONCAT(a, b)" define your own sql for searching. this should be the "left-side" of a WHERE condition. the operator and value will be supplied by ActiveScaffold.
-    attr_writer :search_sql
+    #   search = [:a, :b]       searches in both fields
+    def search_sql=(value)
+      @search_sql = (value == true || value.is_a?(Proc)) ? value : Array(value)
+    end
     def search_sql
       self.initialize_search_sql if @search_sql === true
       @search_sql
@@ -278,6 +284,7 @@ module ActiveScaffold::DataStructures
     # instantiation is handled internally through the DataStructures::Columns object
     def initialize(name, active_record_class) #:nodoc:
       self.name = name.to_sym
+      @tableless = active_record_class < ActiveScaffold::Tableless
       @column = active_record_class.columns_hash[self.name.to_s]
       @association = active_record_class.reflect_on_association(self.name)
       @autolink = !@association.nil?
@@ -308,13 +315,14 @@ module ActiveScaffold::DataStructures
       
       @weight = estimate_weight
 
+      self.clear_link if self.polymorphic_association?
       self.includes = (association and not polymorphic_association?) ? [association.name] : []
     end
 
     # just the field (not table.field)
     def field_name
       return nil if virtual?
-      column ? @active_record_class.connection.quote_column_name(column.name) : association.foreign_key
+      @field_name ||= column ? @active_record_class.connection.quote_column_name(column.name) : association.foreign_key
     end
 
     def <=>(other_column)
@@ -349,12 +357,10 @@ module ActiveScaffold::DataStructures
         # we don't automatically enable method sorting for virtual columns because it's slow, and we expect fewer complaints this way.
         self.sort = false
       else
-        if self.singular_association?
-          self.sort = {:method => "#{self.name}.to_s"}
-        elsif self.plural_association?
-          self.sort = {:method => "#{self.name}.join(',')"}
-        else
+        if column && !@tableless
           self.sort = {:sql => self.field}
+        else
+          self.sort = false
         end
       end
     end
@@ -362,11 +368,9 @@ module ActiveScaffold::DataStructures
     def initialize_search_sql
       self.search_sql = unless self.virtual?
         if association.nil?
-          self.field.to_s
+          self.field.to_s unless @tableless
         elsif !self.polymorphic_association?
-          [association.klass.table_name, association.klass.primary_key].collect! do |str|
-            association.klass.connection.quote_column_name str
-          end.join('.')
+          [association.klass.quoted_table_name, association.klass.quoted_primary_key].join('.') unless association.klass < ActiveScaffold::Tableless
         end
       end
     end
@@ -376,7 +380,7 @@ module ActiveScaffold::DataStructures
 
     # the table.field name for this column, if applicable
     def field
-      @field ||= [@active_record_class.connection.quote_table_name(@table), field_name].join('.')
+      @field ||= [@active_record_class.quoted_table_name, field_name].join('.')
     end
     
     def estimate_weight

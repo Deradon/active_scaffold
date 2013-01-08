@@ -123,9 +123,18 @@ module ActiveScaffold
         url_options[:controller] = link.controller.to_s if link.controller
         url_options.delete(:search) if link.controller and link.controller.to_s != params[:controller]
         url_options.merge! link.parameters if link.parameters
-        @link_record = record
-        url_options.merge! self.instance_eval(&(link.dynamic_parameters)) if link.dynamic_parameters.is_a?(Proc)
-        @link_record = nil
+        if link.dynamic_parameters.is_a?(Proc)
+          if record.nil?
+            url_options.merge! link.dynamic_parameters.call
+          elsif link.dynamic_parameters.arity == 0
+            ActiveSupport::Deprecation.warn("dynamic_parameters must be a block with an argument for member action links, instead of using @link_record")
+            @link_record = record
+            url_options.merge! self.instance_eval(&(link.dynamic_parameters))
+            @link_record = nil
+          else
+            url_options.merge! link.dynamic_parameters.call(record)
+          end
+        end
         url_options_for_nested_link(link.column, record, link, url_options, options) if link.nested_link?
         url_options_for_sti_link(link.column, record, link, url_options, options) unless record.nil? || active_scaffold_config.sti_children.nil?
         url_options[:_method] = link.method if !link.confirm? && link.inline? && link.method != :get
@@ -144,6 +153,7 @@ module ActiveScaffold
         html_options[:data][:confirm] = link.confirm(record.try(:to_label)) if link.confirm?
         html_options[:data][:position] = link.position if link.position and link.inline?
         html_options[:data][:action] = link.action if link.inline?
+        html_options[:data][:'cancel-refresh'] = true if link.inline? and link.refresh_on_close
         if link.popup?
           html_options[:data][:popup] = true
           html_options[:target] = '_blank'
@@ -169,7 +179,7 @@ module ActiveScaffold
           id = "#{column.association.name}-#{record.id}" unless record.nil?
         end if column && column.singular_association?
         id = "#{id}-#{url_options[:batch_scope].downcase}" if url_options[:batch_scope]
-        action_id = "#{id_from_controller(url_options[:controller]) + '-' if url_options[:parent_controller]}#{url_options[:action].to_s}"
+        action_id = "#{id_from_controller(url_options[:controller]) + '-' if url_options[:parent_controller] || url_options[:controller] != controller.controller_path}#{url_options[:action].to_s}"
         action_link_id(action_id, id)
       end
       
@@ -180,19 +190,25 @@ module ActiveScaffold
         if link.image.nil?
           html = link_to(label, url, html_options)
         else
-          html = link_to(image_tag(link.image[:name] , :size => link.image[:size], :alt => label), url, html_options)
+          html = link_to(image_tag(link.image[:name], :size => link.image[:size], :alt => label, :title => label), url, html_options)
         end
         # if url is nil we would like to generate an anchor without href attribute
         url.nil? ? html.sub(/href=".*?"/, '').html_safe : html.html_safe
       end
       
       def url_options_for_nested_link(column, record, link, url_options, options = {})
-        if column && column.association 
+        if column && column.association
+          url_options[:parent_scaffold] = controller_path
           url_options[column.association.active_record.name.foreign_key.to_sym] = url_options.delete(:id)
           url_options[:id] = record.send(column.association.name).id if column.singular_association? && record.send(column.association.name).present?
+          url_options[:eid] = nil # needed for nested scaffolds open from an embedded scaffold
         elsif link.parameters && link.parameters[:named_scope]
+          url_options[:parent_scaffold] = controller_path
           url_options[active_scaffold_config.model.name.foreign_key.to_sym] = url_options.delete(:id)
+          url_options[:eid] = nil # needed for nested scaffolds open from an embedded scaffold
         end
+        url_options.except! *params_conditions
+        url_options.except! *nested.constrained_fields if nested?
       end
 
       def url_options_for_sti_link(column, record, link, url_options, options = {})
@@ -214,7 +230,13 @@ module ActiveScaffold
         class_override_helper = :"#{clean_class_name(record.class.name)}_list_row_class"
         respond_to?(class_override_helper) ? send(class_override_helper, record) : ''
       end
-      
+
+      def column_attributes(column, record)
+        method = override_helper column, 'column_attributes'
+        return send(method, record) if method
+        {}
+      end
+
       def column_class(column, column_value, record)
         classes = []
         classes << "#{column.name}-column"
@@ -228,6 +250,7 @@ module ActiveScaffold
         classes << 'empty' if column_empty? column_value
         classes << 'sorted' if active_scaffold_config.list.user.sorting.sorts_on?(column)
         classes << 'numeric' if column.column and [:decimal, :float, :integer].include?(column.column.type)
+        classes << 'in_place_editor_field' if inplace_edit?(record, column) or column.list_ui == :marked
         classes.join(' ').rstrip
       end
       
@@ -254,11 +277,7 @@ module ActiveScaffold
 
       def column_calculation(column)
         unless column.calculate.instance_of? Proc
-          conditions = controller.send(:all_conditions)
-          includes = active_scaffold_config.list.count_includes
-          includes ||= controller.send(:active_scaffold_includes) unless conditions.nil?
-          calculation = beginning_of_chain.calculate(column.calculate, column.name, :conditions => conditions,
-           :joins => controller.send(:joins_for_collection), :include => includes)
+          calculate(column)
         else
           column.calculate.call(@records)
         end
@@ -290,6 +309,31 @@ module ActiveScaffold
         name.underscore.gsub('/', '_')
       end
      
+      # the naming convention for overriding with helpers
+      def override_helper_name(column, suffix, class_prefix = false)
+        "#{clean_class_name(column.active_record_class.name) + '_' if class_prefix}#{clean_column_name(column.name)}_#{suffix}"
+      end
+
+      def override_helper(column, suffix)
+        method_with_class = override_helper_name(column, suffix, true)
+        return method_with_class if respond_to?(method_with_class)
+        method = override_helper_name(column, suffix)
+        method if respond_to?(method)
+      end
+
+      def display_message(message)
+        if (highlights = active_scaffold_config.highlight_messages)
+          message = highlights.inject(message) do |msg, (phrases, highlighter)|
+            highlight(msg, phrases, highlighter)
+          end
+        end
+        if (format = active_scaffold_config.timestamped_messages)
+          format = :short if format == true
+          message = "#{content_tag :div, l(Time.current, :format => format), :class => 'timestamp'} #{content_tag :div, message, :class => 'message-content'}".html_safe
+        end
+        message
+      end
+
       def active_scaffold_error_messages_for(*params)
         options = params.extract_options!.symbolize_keys
         options.reverse_merge!(:container_tag => :div, :list_type => :ul)

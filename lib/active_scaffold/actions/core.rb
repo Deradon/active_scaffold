@@ -2,10 +2,12 @@ module ActiveScaffold::Actions
   module Core
     def self.included(base)
       base.class_eval do
+        prepend_before_filter :register_constraints_with_action_columns, :unless => :nested?
         after_filter :clear_flashes
+        rescue_from ActiveScaffold::RecordNotAllowed, ActiveScaffold::ActionNotAllowed, :with => :deny_access
       end
       base.helper_method :nested?
-      base.helper_method :beginning_of_chain
+      base.helper_method :calculate
       base.helper_method :new_model
     end
     def render_field
@@ -17,13 +19,15 @@ module ActiveScaffold::Actions
     end
     
     protected
+    def embedded?
+      @embedded ||= params.delete(:embedded)
+    end
 
     def nested?
       false
     end
 
     def render_field_for_inplace_editing
-      register_constraints_with_action_columns(nested.constrained_fields, active_scaffold_config.update.hide_nested_column ? [] : [:update]) if nested?
       @record = find_if_allowed(params[:id], :update)
       render :inline => "<%= active_scaffold_input_for(active_scaffold_config.columns[params[:update_column].to_sym]) %>"
     end
@@ -72,6 +76,10 @@ module ActiveScaffold::Actions
       end
     end
 
+    def each_marked_record(&block)
+      active_scaffold_config.model.find(marked_records.to_a).each &block
+    end
+
     def marked_records
       active_scaffold_session_storage[:marked_records] ||= Set.new
     end
@@ -108,16 +116,16 @@ module ActiveScaffold::Actions
       @response_object = successful? ? (@record || @records) : @record.errors
     end
 
-    # Success is the existence of certain variables and the absence of errors (when applicable).
-    # Success can also be defined.
+    # Success is the existence of one or more model objects. Most actions
+    # circumvent this method by setting @success directly.
     def successful?
       if @successful.nil?
-        @records or (@record and @record.errors.count == 0 and @record.no_errors_in_associated?)
+        @record || @records
       else
         @successful
       end
     end
-
+    
     def successful=(val)
       @successful = (val) ? true : false
     end
@@ -147,25 +155,26 @@ module ActiveScaffold::Actions
         
     # Builds search conditions by search params for column names. This allows urls like "contacts/list?company_id=5".
     def conditions_from_params
-      conditions = nil
-      params.reject {|key, value| [:controller, :action, :id, :page, :sort, :sort_direction].include?(key.to_sym)}.each do |key, value|
-        next unless active_scaffold_config.model.column_names.include?(key)
-        if value.is_a?(Array)
-          conditions = merge_conditions(conditions, ["#{active_scaffold_config.model.table_name}.#{key.to_s} in (?)", value])
-        else
-          conditions = merge_conditions(conditions, ["#{active_scaffold_config.model.table_name}.#{key.to_s} = ?", value])
+      @conditions_from_params ||= begin
+        conditions = {}
+        params.reject {|key, value| [:controller, :action, :id, :page, :sort, :sort_direction].include?(key.to_sym)}.each do |key, value|
+          next unless active_scaffold_config.model.columns_hash[key.to_s]
+          next if active_scaffold_constraints[key.to_sym]
+          next if nested? and nested.constrained_fields.include? key.to_sym
+          conditions[key.to_sym] = value
         end
+        conditions
       end
-      conditions
     end
 
     def new_model
       model = beginning_of_chain
-      if model.columns_hash[model.inheritance_column]
-        build_options = {model.inheritance_column.to_sym => active_scaffold_config.model_id} if nested? && nested.association && nested.association.collection?
-        params = self.params # in new action inheritance_column must be in params
-        params = params[:record] || {} unless params[model.inheritance_column] # in create action must be inside record key
-        model = params.delete(model.inheritance_column).camelize.constantize if params[model.inheritance_column]
+      if nested? && nested.association && nested.association.collection? && model.columns_hash[column = model.inheritance_column]
+        model_name = params.delete(column) # in new action inheritance_column must be in params
+        model_name ||= params[:record].delete(column) unless params[:record].blank? # in create action must be inside record key
+        model_name = model_name.camelize if model_name
+        model_name ||= active_scaffold_config.model.name
+        build_options = {column.to_sym => model_name} if model_name
       end
       model.respond_to?(:build) ? model.build(build_options || {}) : model.new
     end
@@ -174,7 +183,11 @@ module ActiveScaffold::Actions
     def respond_to_action(action)
       respond_to do |type|
         action_formats.each do |format|
-          type.send(format){ send("#{action}_respond_to_#{format}") }
+          type.send(format) do
+            if respond_to?(method_name = "#{action}_respond_to_#{format}")
+              send(method_name)
+            end
+          end
         end
       end
     end
@@ -184,17 +197,6 @@ module ActiveScaffold::Actions
         send("#{action_name}_formats")
       else
         (default_formats + active_scaffold_config.formats).uniq
-      end
-    end
-
-    def response_code_for_rescue(exception)
-      case exception
-        when ActiveScaffold::RecordNotAllowed
-          "403 Record Not Allowed"
-        when ActiveScaffold::ActionNotAllowed
-          "403 Action Not Allowed"
-        else
-          super
       end
     end
   end
